@@ -1,0 +1,19 @@
+[package]
+name = "main-contract"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gstd.workspace = true
+main-contract-io.workspace = true
+#gear-lib.workspace = true  
+gear-lib-old.workspace = true 
+
+[dev-dependencies]
+gtest.workspace = true
+nft-io.workspace = true
+
+[build-dependencies]
+main-contract-io.workspace = true
+gear-wasm-builder.workspace = true
