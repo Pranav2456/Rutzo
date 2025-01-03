@@ -1,29 +1,21 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Card, Facedowncard, PlayButton, EmptySlot } from "@/components";
-import "./slide-in.css";
-import "./fire.css";
-import "./selectedCards.css";
-import "./MainGame.css";
 import useGameState from "@/hooks/useGameState";
-import "slick-carousel/slick/slick.css";
-import "slick-carousel/slick/slick-theme.css";
-import "./BoardGame.css";
-import CardsContainer from "@/components/deck-container/CardsContainer";
 import { useApi, useAccount, useAlert } from "@gear-js/react-hooks";
 import { MAIN_CONTRACT } from "@/app/consts";
 import { ProgramMetadata } from "@gear-js/api";
-import { gasToSpend } from "@/app/utils";
-import { web3FromSource } from "@polkadot/extension-dapp";
+import { CardProps } from "@/interfaces/Card";
 
-function BoardGame2() {
+const POLLING_INTERVAL = 2000; // Poll every 2 seconds
+
+export function BoardGame2() {
   const location = useLocation();
   const navigate = useNavigate();
   const selectedCards = location.state?.selectedCards || [];
   const { api } = useApi();
   const { account } = useAccount();
   const alert = useAlert();
-  const mainContractMetadata = ProgramMetadata.from(MAIN_CONTRACT.METADATA);
 
   const {
     userPressPlayButton,
@@ -32,6 +24,9 @@ function BoardGame2() {
     nftsLoaded,
     userInMatch,
     matchInProgress,
+    setMatchInProgress,
+    setEnemyCard,
+    setUserInMatch,
     actualUserInMatch,
     enemyCard,
     enemyCardCount,
@@ -43,148 +38,199 @@ function BoardGame2() {
     removeCardToPlay,
     setUserWonTheMatch,
     resetBoard,
+    getCurrentUserMatch,
+    sendPlayCardTransaction
   } = useGameState();
 
   const [isPlayerTurn, setIsPlayerTurn] = useState(true);
-  const [timeLeft, setTimeLeft] = useState(180); // 3 minutes in seconds
+  const [timeLeft, setTimeLeft] = useState(180);
   const [showDialog, setShowDialog] = useState(false);
-  const [gameId, setGameId] = useState<number | null>(null);
+  const [currentMatchId, setCurrentMatchId] = useState<number | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const fetchGameState = async () => {
-    if (!api || !account) return;
+  // Poll game state
+  const pollGameState = useCallback(async () => {
+    if (!api || !account || !currentMatchId) return;
 
     try {
-      // Check if the player is in a match
-      const playerInMatchResult = await api.programState.read(
-        {
+      const [roundStateResult, matchStateResult] = await Promise.all([
+        api.programState.read({
           programId: MAIN_CONTRACT.PROGRAM_ID,
-          payload: { PlayerIsInMatch: account.decodedAddress },
-        },
-        mainContractMetadata
-      );
+          payload: { RoundInformationFromGameId: currentMatchId }
+        }, ProgramMetadata.from(MAIN_CONTRACT.METADATA)),
+        
+        api.programState.read({
+          programId: MAIN_CONTRACT.PROGRAM_ID,
+          payload: { MatchStateById: currentMatchId }
+        }, ProgramMetadata.from(MAIN_CONTRACT.METADATA))
+      ]);
+      
+      const roundState = roundStateResult.toJSON()?.roundState;
+      const matchState = matchStateResult.toJSON()?.matchState;
+      
+      if (roundState) {
+        const isCurrentPlayerTurn = roundState.currentPlayer === account.decodedAddress;
+        setIsPlayerTurn(isCurrentPlayerTurn);
 
-      const gameId = playerInMatchResult?.PlayerInMatch;
-      if (gameId) {
-        setGameId(gameId);
+        if (roundState.lastPlayedCard && !isCurrentPlayerTurn) {
+          // Update enemy card when it's not player's turn
+          setEnemyCard(roundState.lastPlayedCard);
+        }
+      }
 
-        // Fetch game information by game ID
-        const gameInfoResult = await api.programState.read(
-          {
-            programId: MAIN_CONTRACT.PROGRAM_ID,
-            payload: { GameInformationById: gameId },
-          },
-          mainContractMetadata
-        );
-
-        // Update the game state with the fetched data
-        // Assuming the gameInfoResult contains the necessary game state information
-        // Update the relevant state variables here
+      // Check if game is finished
+      if (matchState && matchState.finished) {
+        const isDraw = matchState.finished.draw;
+        const isWinner = !isDraw && matchState.finished.winner === account.decodedAddress;
+        setUserWonTheMatch(isDraw ? null : isWinner);
+        setMatchInProgress(false);
       }
     } catch (error) {
-      console.error("An error occurred while fetching game state:", error);
-      alert.error("An unexpected error occurred. Please try again.");
+      console.error("Error polling game state:", error);
     }
-  };
+  }, [api, account, currentMatchId]);
 
-  const throwCard = async (cardId: string) => {
-    if (!api || !account || gameId === null) return;
+  // Setup polling when match is in progress
+  useEffect(() => {
+    let pollInterval: NodeJS.Timeout;
+    
+    if (matchInProgress && currentMatchId) {
+      pollInterval = setInterval(pollGameState, POLLING_INTERVAL);
+    }
+
+    return () => {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
+    };
+  }, [matchInProgress, currentMatchId, pollGameState]);
+
+  // Handle card play
+  const handleCardPlay = async (card: CardProps) => {
+    if (!isPlayerTurn || !currentMatchId) {
+      alert.error("Not your turn!");
+      return;
+    }
 
     try {
-      const gas = await api.program.calculateGas.handle(
-        account.decodedAddress ?? "0x00",
-        MAIN_CONTRACT.PROGRAM_ID,
-        {
-          ThrowCard: cardId,
-        },
-        0,
-        false,
-        mainContractMetadata
-      );
-
-      const { signer } = await web3FromSource(account.meta.source);
-
-      const throwCardExtrinsic = api.message.send(
-        {
-          destination: MAIN_CONTRACT.PROGRAM_ID,
-          payload: {
-            ThrowCard: cardId,
-          },
-          gasLimit: gasToSpend(gas),
-          value: 0,
-          prepaid: true,
-          account: account.decodedAddress,
-        },
-        mainContractMetadata
-      );
-
-      await throwCardExtrinsic.signAndSend(
-        account.decodedAddress,
-        { signer },
-        ({ status, events }) => {
-          if (status.isInBlock) {
-            console.log(
-              `Completed at block hash #${status.asInBlock.toString()}`
-            );
-            alert.success(`Card thrown successfully!`);
-            fetchGameState(); // Fetch the updated game state
-          } else {
-            console.log(`Current status: ${status.type}`);
-          }
-        }
-      );
+      setIsLoading(true);
+      await sendPlayCardTransaction(Number(card[0]));
+      setIsPlayerTurn(false);
+      addCardToPlay(card);
     } catch (error) {
-      console.error("An error occurred:", error);
-      alert.error("An unexpected error occurred. Please try again.");
+      console.error("Error playing card:", error);
+      alert.error("Failed to play card. Please try again.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
+  // Start new game
   const handleNewGame = () => {
     resetBoard();
     setIsPlayerTurn(true);
     setUserWonTheMatch(null);
+    setCurrentMatchId(null);
     navigate("/selection");
   };
 
+  // Go to home
   const handleGoHome = () => {
     resetBoard();
     setIsPlayerTurn(true);
     setUserWonTheMatch(null);
+    setCurrentMatchId(null);
     navigate("/");
   };
 
-  let timer: NodeJS.Timeout;
+  // Handle play button
+  const startGame = async () => {
+    if (selectedCards.length !== 3) {
+      alert.error("Please select exactly 3 cards");
+      return;
+    }
 
+    setIsLoading(true);
+    setShowDialog(true);
+
+    try {
+      await handlePlayButton();
+      const matchId = await getCurrentUserMatch();
+      console.log("Match ID:", matchId);
+      
+      if (matchId !== -1) {
+        setCurrentMatchId(matchId);
+        setUserInMatch(true);
+        setMatchInProgress(true);
+      } else {
+        throw new Error("Failed to get match ID");
+      }
+    } catch (error) {
+      console.error("Error starting game:", error);
+      alert.error("Failed to start game. Please try again.");
+      resetBoard();
+    } finally {
+      setIsLoading(false);
+      setShowDialog(false);
+    }
+  };
+
+  // Countdown timer effect
   useEffect(() => {
+    let timer: NodeJS.Timeout;
+    
     if (showDialog && timeLeft > 0) {
       timer = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
+        setTimeLeft(prev => prev - 1);
       }, 1000);
     } else if (timeLeft === 0) {
       clearInterval(timer);
       setShowDialog(false);
       navigate("/play");
     }
-    return () => clearInterval(timer);
+    
+    return () => {
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
   }, [showDialog, timeLeft, navigate]);
 
+  // Initialize match ID on mount
   useEffect(() => {
-    // Fetch the game state when the component mounts
-    fetchGameState();
-  }, [api, account]);
+    const initMatchId = async () => {
+      if (api && account) {
+        const matchId = await getCurrentUserMatch();
+        if (matchId !== -1) {
+          setCurrentMatchId(matchId);
+        }
+      }
+    };
+    
+    initMatchId();
+  }, [api, account, getCurrentUserMatch]);
 
-  const cancelMatch = () => {
-    setShowDialog(false);
-    setTimeLeft(180);
-  };
-
-  const isButtonDisabled = selectedCards.length !== 3;
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      resetBoard();
+    };
+  }, []);
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-black text-white p-2">
+      {/* Loading overlay */}
+      {isLoading && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="animate-spin rounded-full h-32 w-32 border-t-2 border-b-2 border-purple-500"></div>
+        </div>
+      )}
+
+      {/* Player info header */}
       <div className="w-full max-w-5xl flex justify-between items-center mb-4">
         <div className="flex items-center mt-10">
           <img
-            src="https://www.rutzo.tech/NFT/lightning/nova_lighting.jpg"
+            src="/player-avatar.jpg"
             alt="Player Avatar"
             className="w-10 h-10 rounded-full mr-2"
           />
@@ -197,20 +243,23 @@ function BoardGame2() {
             {enemyName}
           </p>
           <img
-            src="https://www.rutzo.tech/NFT/poison/angel_of_death_poison.jpg"
+            src="/enemy-avatar.jpg"
             alt="Enemy Avatar"
             className="w-10 h-10 rounded-full"
           />
         </div>
       </div>
 
+      {/* Turn indicator */}
       <div className="flex justify-center mb-2 bg-gradient-to-r from-purple-800 to-green-500 rounded-xl">
         <p className="text-sm p-2 font-bold">
           {isPlayerTurn ? "Your Turn" : "Enemy's Turn"}
         </p>
       </div>
 
+      {/* Game board */}
       <div className="w-full max-w-5xl grid grid-cols-2 gap-4 mb-8">
+        {/* Player side */}
         <div className="flex flex-col items-center">
           <div className="bg-slate-900 rounded-lg mb-4 p-2 flex items-center justify-center">
             {cardToPlay ? (
@@ -219,34 +268,33 @@ function BoardGame2() {
                 title={cardToPlay[1].name}
                 type={cardToPlay[1].description.toLowerCase()}
                 value={cardToPlay[1].reference}
-                onCardClick={() => throwCard(cardToPlay[0])}
+                onCardClick={() => isPlayerTurn && removeCardToPlay(cardToPlay)}
                 scale={1}
               />
             ) : (
-              <Facedowncard scale={1.0} />
+              <EmptySlot scale={1.0} />
             )}
           </div>
           <div className="flex justify-center space-x-2">
-            {selectedCards.map((card: [string, any]) => {
-              const [nftId, elemento] = card;
-              return (
-                <Card
-                  key={nftId}
-                  image={elemento.media}
-                  title={elemento.name}
-                  type={elemento.description.toLowerCase()}
-                  value={elemento.reference}
-                  onCardClick={() => addCardToPlay(card)}
-                  scale={0.6}
-                />
-              );
-            })}
+            {selectedCards.map((card: CardProps) => (
+              <Card
+                key={card[0]}
+                image={card[1].media}
+                title={card[1].name}
+                type={card[1].description.toLowerCase()}
+                value={card[1].reference}
+                onCardClick={() => isPlayerTurn && handleCardPlay(card)}
+                scale={0.6}
+              />
+            ))}
             {selectedCards.length < 3 &&
               Array.from(Array(3 - selectedCards.length).keys()).map(
                 (index) => <EmptySlot key={`empty-${index}`} />
               )}
           </div>
         </div>
+
+        {/* Enemy side */}
         <div className="flex flex-col items-center">
           <div className="bg-slate-900 rounded-lg mb-4 p-2 flex items-center justify-center">
             {enemyCard ? (
@@ -263,30 +311,29 @@ function BoardGame2() {
           </div>
           <div className="flex justify-center space-x-2">
             {Array.from({ length: enemyCardCount }).map((_, index) => (
-              <Facedowncard key={`facedown-${index}`} scale={0.6} />
+              <Facedowncard key={`enemy-card-${index}`} scale={0.6} />
             ))}
           </div>
         </div>
       </div>
 
+      {/* Game end modal */}
       {userWonTheMatch !== null && (
-        <div className="fixed inset-0 flex flex-col items-center justify-center bg-black bg-opacity-75">
-          <div className="bg-black text-white p-8 rounded-lg text-center mb-4 border-2 border-violet-800">
-            {userWonTheMatch ? (
-              <h2 className="text-lg">You won! 🎉</h2>
-            ) : (
-              <h2>You lose ):</h2>
-            )}
-            <div className="flex space-x-4 mt-8">
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-75">
+          <div className="bg-black text-white p-8 rounded-lg text-center border-2 border-violet-800">
+            <h2 className="text-lg mb-4">
+              {userWonTheMatch ? "You won! 🎉" : "You lost..."}
+            </h2>
+            <div className="flex space-x-4">
               <button
                 onClick={handleNewGame}
-                className="px-6 py-2 bg-gradient-to-r from-purple-800 to-green-500 text-white rounded-full shadow-md hover:shadow-lg"
+                className="px-6 py-2 bg-gradient-to-r from-purple-800 to-green-500 text-white rounded-full"
               >
                 New Game
               </button>
               <button
                 onClick={handleGoHome}
-                className="px-6 py-2 bg-gradient-to-r from-purple-800 to-green-500 text-white rounded-full shadow-md hover:shadow-lg"
+                className="px-6 py-2 bg-gradient-to-r from-purple-800 to-green-500 text-white rounded-full"
               >
                 Home
               </button>
@@ -295,6 +342,7 @@ function BoardGame2() {
         </div>
       )}
 
+      {/* Searching opponent dialog */}
       {showDialog && (
         <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-75">
           <div className="bg-black text-white p-8 rounded-lg text-center border-2 border-violet-800">
@@ -303,37 +351,26 @@ function BoardGame2() {
               Time left: {Math.floor(timeLeft / 60)}:
               {(timeLeft % 60).toString().padStart(2, "0")}
             </p>
-            <div className="flex justify-center mt-8">
-              <button
-                onClick={cancelMatch}
-                className="px-6 py-2 bg-gradient-to-r from-red-800 to-red-500 text-white rounded-full shadow-md hover:shadow-lg"
-              >
-                Cancel Match
-              </button>
-            </div>
+            <button
+              onClick={() => setShowDialog(false)}
+              className="mt-4 px-6 py-2 bg-red-600 rounded-full"
+            >
+              Cancel
+            </button>
           </div>
         </div>
       )}
 
-      <div className="fixed bottom-4 right-4">
+      {/* Play button */}
+      {!userInMatch && (
         <button
-          className={`px-6 py-2 rounded-full shadow-md ${
-            isButtonDisabled ? "bg-gray-500" : "bg-green-500 hover:bg-green-700"
-          }`}
-          onClick={(e) => {
-            if (isButtonDisabled) {
-              e.preventDefault();
-            } else {
-              handlePlayButton();
-            }
-          }}
-          disabled={isButtonDisabled}
+          className="fixed bottom-4 right-4 px-6 py-2 bg-green-500 rounded-full disabled:bg-gray-500"
+          onClick={startGame}
+          disabled={selectedCards.length !== 3}
         >
           Let's Go!
         </button>
-      </div>
+      )}
     </div>
   );
 }
-
-export { BoardGame2 };

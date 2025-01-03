@@ -1,49 +1,61 @@
-import {useState} from "react";
-import {CardProps} from "@/interfaces/Card";
+import { useState, useEffect, useCallback } from "react";
+import { CardProps } from "@/interfaces/Card";
 import useCardsData from "@/hooks/useCardsData";
-import {useEffect} from "react";
+
+const MAX_SELECTED_CARDS = 3;
 
 const useLocalBoard = () => {
-	const MAX_SELECTED_CARDS = 3;
-	const [availableCards, setAvailableCards] = useState<CardProps[]>([]);
-	const [selectedCards, setSelectedCards] = useState<CardProps[]>([]);
+    const [availableCards, setAvailableCards] = useState<CardProps[]>([]);
+    const [selectedCards, setSelectedCards] = useState<CardProps[]>([]);
 
+    const { 
+        allUserCards, 
+        fetchData, 
+        getPlayingCards,
+        isLoading,
+        error 
+    } = useCardsData();
 
-	const {allUserCards, fetchData, getPlayingCards, } = useCardsData();
+    useEffect(() => {
+        const initData = async () => {
+            await fetchData();
+            await getPlayingCards();
+        };
+        initData();
+    }, [fetchData, getPlayingCards]);
 
-	useEffect(() => {
-			fetchData();
-			getPlayingCards();
-		}
-		, [fetchData, getPlayingCards]);
+    useEffect(() => {
+        setAvailableCards(allUserCards);
+    }, [allUserCards]);
 
-	useEffect(() => {
-		setAvailableCards(allUserCards);
-	}, [allUserCards]);
+    const pushCard = useCallback((card: CardProps) => {
+        if (selectedCards.length < MAX_SELECTED_CARDS) {
+            setSelectedCards(prev => [...prev, card]);
+            setAvailableCards(prev => prev.filter((c) => c[0] !== card[0]));
+        }
+    }, [selectedCards.length]);
 
-const pushCard = (card: CardProps) => {
-		if (selectedCards.length < MAX_SELECTED_CARDS) {
-			setSelectedCards([...selectedCards, card]);
-			setAvailableCards(availableCards.filter((c) => c[0] !== card[0]));
-		}
-	};
+    const removeCard = useCallback((card: CardProps) => {
+        setSelectedCards(prev => prev.filter((c) => c[0] !== card[0]));
+        setAvailableCards(prev => [...prev, card]);
+    }, []);
 
-	const removeCard = (card: CardProps) => {
-		setSelectedCards(selectedCards.filter((c) => c[0] !== card[0]));
-		setAvailableCards([...availableCards, card]);
-	};
+    const clearSelectedCards = useCallback(() => {
+        setAvailableCards(prev => [...prev, ...selectedCards]);
+        setSelectedCards([]);
+    }, [selectedCards]);
 
-	const clearSelectedCards = () => {
-		setAvailableCards([...availableCards, ...selectedCards]);
-		setSelectedCards([]);
-	}
-
-	const board = {availableCards, selectedCards};
-
-
-
-
-	return {pushCard, removeCard, clearSelectedCards, board};
+    return {
+        pushCard,
+        removeCard,
+        clearSelectedCards,
+        board: {
+            availableCards,
+            selectedCards
+        },
+        isLoading,
+        error
+    };
 };
 
 export default useLocalBoard;
