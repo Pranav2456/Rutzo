@@ -1,84 +1,92 @@
-import {useCallback, useState} from 'react';
-import {MAIN_CONTRACT, NFT_CONTRACT} from "@/app/consts";
-import {ProgramMetadata} from "@gear-js/api";
-import {useAccount, useApi} from "@gear-js/react-hooks";
-
+import { useCallback, useState } from 'react';
+import { MAIN_CONTRACT, NFT_CONTRACT } from "@/app/consts";
+import { ProgramMetadata } from "@gear-js/api";
+import { useAccount, useApi } from "@gear-js/react-hooks";
+import { CardProps } from '@/interfaces/Card';
 
 const useCardsData = () => {
-	const {api} = useApi();
-	const {account} = useAccount();
+    const { api } = useApi();
+    const { account } = useAccount();
 
-	const mainContractMetadata = ProgramMetadata.from(MAIN_CONTRACT.METADATA);
-	const nftContractMetadata = ProgramMetadata.from(NFT_CONTRACT.METADATA);
+    const mainContractMetadata = ProgramMetadata.from(MAIN_CONTRACT.METADATA);
+    const nftContractMetadata = ProgramMetadata.from(NFT_CONTRACT.METADATA);
 
+    const [allUserCards, setAllUserCards] = useState<CardProps[]>([]);
+    const [playingUserCards, setPlayingUserCards] = useState<string>("");
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
-	const [allUserCards, setAllUserCards] = useState([]);
-	const [playingUserCards, setPlayingUserCards] = useState("");
+    const getMatchId = useCallback(async (): Promise<number> => {
+        if (!api || !account) return -1;
 
+        try {
+            const response = await api.programState.read({
+                programId: MAIN_CONTRACT.PROGRAM_ID,
+                payload: { PlayerIsInMatch: account.decodedAddress }
+            }, mainContractMetadata);
 
-	const getMatchId = async () => {
-		if (!api || !account) return;
+            const { playerInMatch }: any = response.toJSON();
+            return playerInMatch ?? -1;
+        } catch (error) {
+            console.error("Error getting match ID:", error);
+            setError("Failed to get match ID");
+            return -1;
+        }
+    }, [api, account, mainContractMetadata]);
 
-		const payload = account?.decodedAddress ? {PlayerIsInMatch: account.decodedAddress} : null;
+    const fetchData = useCallback(async () => {
+        if (!account || !api) return;
+        setIsLoading(true);
+        setError(null);
 
-		if (!payload) return;
+        try {
+            const response = await api.programState.read({
+                programId: NFT_CONTRACT.PROGRAM_ID,
+                payload: { tokensForOwner: account.decodedAddress }
+            }, nftContractMetadata);
 
-		const response = await api.programState.read({
-			programId: MAIN_CONTRACT.PROGRAM_ID,
-			payload
-		}, mainContractMetadata);
+            const formattedResponse: any = response.toJSON();
+            setAllUserCards(formattedResponse.tokensForOwner ?? []);
+        } catch (error) {
+            console.error("Error fetching user cards:", error);
+            setError("Failed to fetch cards");
+        } finally {
+            setIsLoading(false);
+        }
+    }, [api, account, nftContractMetadata]);
 
-		const {playerInMatch}: any = response.toJSON();
+    const getPlayingCards = useCallback(async () => {
+        if (!account || !api) return;
+        
+        try {
+            const matchId = await getMatchId();
+            if (matchId === -1) return;
 
-		return playerInMatch ?? -1;
+            const response = await api.programState.read({
+                programId: MAIN_CONTRACT.PROGRAM_ID,
+                payload: { GameInformationById: matchId }
+            }, mainContractMetadata);
 
-	}
+            const formattedResponse: any = response.toJSON();
+            const { gameInformation } = formattedResponse;
 
+            if (gameInformation?.user1?.chosenNft) {
+                setPlayingUserCards(gameInformation.user1.chosenNft);
+            }
+        } catch (error) {
+            console.error("Error getting playing cards:", error);
+            setError("Failed to get playing cards");
+        }
+    }, [api, account, mainContractMetadata, getMatchId]);
 
-	const fetchData = useCallback(async () => {
-		if (!account || !api) return;
-
-		try {
-			const response = await api.programState.read({
-				programId: NFT_CONTRACT.PROGRAM_ID,
-				payload: {tokensForOwner: account?.decodedAddress ?? "0x0"}
-			}, nftContractMetadata);
-
-			const formatedResponse: any = await response.toJSON();
-
-			setAllUserCards(formatedResponse.tokensForOwner ?? []);
-		} catch (error) {
-			console.error(error);
-		}
-	}, []);
-
-	const getPlayingCards = useCallback(async () => {
-		if (!account || !api) return;
-		const matchId = await getMatchId();
-
-		try {
-			const response = await api.programState.read({
-				programId: MAIN_CONTRACT.PROGRAM_ID,
-				payload: {GameInformationById: [matchId]}
-			}, mainContractMetadata);
-
-			const formatedResponse: any = await response.toJSON();
-			console.log("formatedResponse", formatedResponse);
-
-			const {chosenNft: tokenId} = formatedResponse.gameInformation.user1;
-			/* TODO: Se puede tomar la info directamente */
-
-			setPlayingUserCards(tokenId);
-
-
-		} catch (error) {
-			console.error(error);
-		}
-
-	}, []);
-
-	return {allUserCards, fetchData, getPlayingCards, playingUserCards};
-}
-
+    return { 
+        allUserCards, 
+        fetchData, 
+        getPlayingCards, 
+        playingUserCards,
+        isLoading,
+        error 
+    };
+};
 
 export default useCardsData;
