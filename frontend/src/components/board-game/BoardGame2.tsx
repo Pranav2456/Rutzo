@@ -13,6 +13,8 @@ import CardsContainer from "@/components/deck-container/CardsContainer";
 import { useApi, useAccount, useAlert } from "@gear-js/react-hooks";
 import { MAIN_CONTRACT } from "@/app/consts";
 import { ProgramMetadata } from "@gear-js/api";
+import { gasToSpend } from "@/app/utils";
+import { web3FromSource } from "@polkadot/extension-dapp";
 
 function BoardGame2() {
   const location = useLocation();
@@ -46,24 +48,92 @@ function BoardGame2() {
   const [isPlayerTurn, setIsPlayerTurn] = useState(true);
   const [timeLeft, setTimeLeft] = useState(180); // 3 minutes in seconds
   const [showDialog, setShowDialog] = useState(false);
+  const [gameId, setGameId] = useState<number | null>(null);
 
   const fetchGameState = async () => {
     if (!api || !account) return;
 
     try {
-      const stateResult = await api.programState.read(
+      // Check if the player is in a match
+      const playerInMatchResult = await api.programState.read(
         {
           programId: MAIN_CONTRACT.PROGRAM_ID,
-          payload: { GetGameState: { user_id: account.decodedAddress } },
+          payload: { PlayerIsInMatch: account.decodedAddress },
         },
         mainContractMetadata
       );
 
-      // Update the game state with the fetched data
-      // Assuming the stateResult contains the necessary game state information
-      // Update the relevant state variables here
+      const gameId = playerInMatchResult?.PlayerInMatch;
+      if (gameId) {
+        setGameId(gameId);
+
+        // Fetch game information by game ID
+        const gameInfoResult = await api.programState.read(
+          {
+            programId: MAIN_CONTRACT.PROGRAM_ID,
+            payload: { GameInformationById: gameId },
+          },
+          mainContractMetadata
+        );
+
+        // Update the game state with the fetched data
+        // Assuming the gameInfoResult contains the necessary game state information
+        // Update the relevant state variables here
+      }
     } catch (error) {
       console.error("An error occurred while fetching game state:", error);
+      alert.error("An unexpected error occurred. Please try again.");
+    }
+  };
+
+  const throwCard = async (cardId: string) => {
+    if (!api || !account || gameId === null) return;
+
+    try {
+      const gas = await api.program.calculateGas.handle(
+        account.decodedAddress ?? "0x00",
+        MAIN_CONTRACT.PROGRAM_ID,
+        {
+          ThrowCard: cardId,
+        },
+        0,
+        false,
+        mainContractMetadata
+      );
+
+      const { signer } = await web3FromSource(account.meta.source);
+
+      const throwCardExtrinsic = api.message.send(
+        {
+          destination: MAIN_CONTRACT.PROGRAM_ID,
+          payload: {
+            ThrowCard: cardId,
+          },
+          gasLimit: gasToSpend(gas),
+          value: 0,
+          prepaid: true,
+          account: account.decodedAddress,
+        },
+        mainContractMetadata
+      );
+
+      await throwCardExtrinsic.signAndSend(
+        account.decodedAddress,
+        { signer },
+        ({ status, events }) => {
+          if (status.isInBlock) {
+            console.log(
+              `Completed at block hash #${status.asInBlock.toString()}`
+            );
+            alert.success(`Card thrown successfully!`);
+            fetchGameState(); // Fetch the updated game state
+          } else {
+            console.log(`Current status: ${status.type}`);
+          }
+        }
+      );
+    } catch (error) {
+      console.error("An error occurred:", error);
       alert.error("An unexpected error occurred. Please try again.");
     }
   };
@@ -149,7 +219,7 @@ function BoardGame2() {
                 title={cardToPlay[1].name}
                 type={cardToPlay[1].description.toLowerCase()}
                 value={cardToPlay[1].reference}
-                onCardClick={() => removeCardToPlay(cardToPlay)}
+                onCardClick={() => throwCard(cardToPlay[0])}
                 scale={1}
               />
             ) : (
