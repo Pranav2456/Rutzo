@@ -1,26 +1,62 @@
-import React from "react";
+import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import useLocalBoard from "@/hooks/useLocalBoard";
 import { Card } from "@/components";
 import { FaTrash } from "react-icons/fa6";
-import { useAccount } from "@gear-js/react-hooks";
+import { useAccount, useAlert } from "@gear-js/react-hooks";
 import { CardProps } from "@/interfaces/Card";
 
+const MAX_CARDS = 3;
+
 const Selection = () => {
-  // Only import what we need
   const { pushCard, removeCard, clearSelectedCards, board } = useLocalBoard();
   const navigate = useNavigate();
   const { account } = useAccount();
+  const alert = useAlert();
+  const [playWithBot, setPlayWithBot] = useState(false);
+
+  // Validate cards before proceeding
+  const validateCards = (cards: CardProps[]) => {
+    if (cards.length !== MAX_CARDS) {
+      alert.error(`Please select exactly ${MAX_CARDS} cards`);
+      return false;
+    }
+
+    // Check if all cards have valid types and powers
+    for (const card of cards) {
+      const type = card[1].description.toLowerCase();
+      const power = Number(card[1].reference);
+
+      if (!["fire", "water", "rock", "ice", "dark", "fighting"].includes(type)) {
+        alert.error(`Invalid card type: ${type}`);
+        return false;
+      }
+
+      if (isNaN(power) || power <= 0) {
+        alert.error(`Invalid card power: ${card[1].reference}`);
+        return false;
+      }
+    }
+
+    return true;
+  };
 
   const handleLetsGo = () => {
     if (!account) {
-      alert("Please connect your wallet");
+      alert.error("Please connect your wallet");
       return;
     }
 
-    // Simply navigate with selected cards
+    if (!validateCards(board.selectedCards)) {
+      return;
+    }
+
+    // Navigate with selected cards and game mode
     navigate("/fight", {
-      state: { selectedCards: board.selectedCards },
+      state: { 
+        selectedCards: board.selectedCards,
+        playWithBot 
+      },
     });
   };
 
@@ -32,6 +68,32 @@ const Selection = () => {
           your cards
         </span>
       </h1>
+
+      {/* Game Mode Selection */}
+      <div className="flex justify-center mb-8">
+        <div className="flex gap-4 bg-gray-800 p-2 rounded-lg">
+          <button
+            onClick={() => setPlayWithBot(false)}
+            className={`px-4 py-2 rounded-lg ${
+              !playWithBot 
+                ? "bg-gradient-to-r from-purple-800 to-green-500" 
+                : "bg-gray-700"
+            }`}
+          >
+            Play with Player
+          </button>
+          <button
+            onClick={() => setPlayWithBot(true)}
+            className={`px-4 py-2 rounded-lg ${
+              playWithBot 
+                ? "bg-gradient-to-r from-purple-800 to-green-500" 
+                : "bg-gray-700"
+            }`}
+          >
+            Play with Bot
+          </button>
+        </div>
+      </div>
 
       {/* Available Cards Section */}
       <div className="mb-8">
@@ -46,7 +108,13 @@ const Selection = () => {
               title={card[1].name}
               type={card[1].description.toLowerCase()}
               value={card[1].reference}
-              onCardClick={() => pushCard(card)}
+              onCardClick={() => {
+                if (board.selectedCards.length < MAX_CARDS) {
+                  pushCard(card);
+                } else {
+                  alert.error(`Maximum ${MAX_CARDS} cards allowed`);
+                }
+              }}
             />
           ))}
         </div>
@@ -56,7 +124,7 @@ const Selection = () => {
       <div className="mb-8">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-2xl font-bold text-center bg-gradient-to-r from-purple-800 to-green-500 text-white rounded-lg p-1">
-            Selected Cards ({board.selectedCards.length}/3)
+            Selected Cards ({board.selectedCards.length}/{MAX_CARDS})
           </h2>
           {board.selectedCards.length > 0 && (
             <button
@@ -90,10 +158,10 @@ const Selection = () => {
       <div className="flex justify-center">
         <button
           onClick={handleLetsGo}
-          disabled={board.selectedCards.length !== 3}
+          disabled={board.selectedCards.length !== MAX_CARDS}
           className="px-6 py-2 bg-gradient-to-r from-purple-800 to-green-500 text-white rounded-full shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Let's go
+          Let's go {playWithBot ? "vs Bot" : "vs Player"}
         </button>
       </div>
     </div>

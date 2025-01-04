@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Card, Facedowncard, PlayButton, EmptySlot } from "@/components";
+import { Card, Facedowncard, EmptySlot } from "@/components";
 import useGameState from "@/hooks/useGameState";
 import { useApi, useAccount, useAlert } from "@gear-js/react-hooks";
 import { MAIN_CONTRACT } from "@/app/consts";
@@ -8,11 +8,14 @@ import { ProgramMetadata } from "@gear-js/api";
 import { CardProps } from "@/interfaces/Card";
 
 const POLLING_INTERVAL = 2000; // Poll every 2 seconds
+const MAX_POLLING_ATTEMPTS = 10;
 
 export function BoardGame2() {
   const location = useLocation();
   const navigate = useNavigate();
   const selectedCards = location.state?.selectedCards || [];
+  const playWithBot = location.state?.playWithBot ?? true; // Default to bot mode
+
   const { api } = useApi();
   const { account } = useAccount();
   const alert = useAlert();
@@ -26,6 +29,7 @@ export function BoardGame2() {
     matchInProgress,
     setMatchInProgress,
     setEnemyCard,
+    setEnemyCardCount,
     setUserInMatch,
     actualUserInMatch,
     enemyCard,
@@ -33,13 +37,15 @@ export function BoardGame2() {
     userWonTheMatch,
     handlePlayButton,
     cardSelected,
+    getMatchDetails,
     enemyName,
     addCardToPlay,
     removeCardToPlay,
     setUserWonTheMatch,
     resetBoard,
     getCurrentUserMatch,
-    sendPlayCardTransaction
+    sendPlayCardTransaction,
+    sendJoinGameTransaction,
   } = useGameState();
 
   const [isPlayerTurn, setIsPlayerTurn] = useState(true);
@@ -47,6 +53,8 @@ export function BoardGame2() {
   const [showDialog, setShowDialog] = useState(false);
   const [currentMatchId, setCurrentMatchId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [currentRound, setCurrentRound] = useState(1);
+  const [roundResult, setRoundResult] = useState<string | null>(null);
 
   // Poll game state
   const pollGameState = useCallback(async () => {
@@ -54,36 +62,62 @@ export function BoardGame2() {
 
     try {
       const [roundStateResult, matchStateResult] = await Promise.all([
-        api.programState.read({
-          programId: MAIN_CONTRACT.PROGRAM_ID,
-          payload: { RoundInformationFromGameId: currentMatchId }
-        }, ProgramMetadata.from(MAIN_CONTRACT.METADATA)),
-        
-        api.programState.read({
-          programId: MAIN_CONTRACT.PROGRAM_ID,
-          payload: { MatchStateById: currentMatchId }
-        }, ProgramMetadata.from(MAIN_CONTRACT.METADATA))
+        api.programState.read(
+          {
+            programId: MAIN_CONTRACT.PROGRAM_ID,
+            payload: { RoundInformationFromGameId: currentMatchId },
+          },
+          ProgramMetadata.from(MAIN_CONTRACT.METADATA)
+        ),
+
+        api.programState.read(
+          {
+            programId: MAIN_CONTRACT.PROGRAM_ID,
+            payload: { MatchStateById: currentMatchId },
+          },
+          ProgramMetadata.from(MAIN_CONTRACT.METADATA)
+        ),
       ]);
-      
+
       const roundState = roundStateResult.toJSON()?.roundState;
       const matchState = matchStateResult.toJSON()?.matchState;
-      
+
       if (roundState) {
-        const isCurrentPlayerTurn = roundState.currentPlayer === account.decodedAddress;
+        const isCurrentPlayerTurn =
+          roundState.currentPlayer === account.decodedAddress;
         setIsPlayerTurn(isCurrentPlayerTurn);
 
+        // Update enemy card if it's played
         if (roundState.lastPlayedCard && !isCurrentPlayerTurn) {
-          // Update enemy card when it's not player's turn
           setEnemyCard(roundState.lastPlayedCard);
+          setEnemyCardCount((prev) => Math.max(0, prev - 1));
+        }
+
+        // Update round state
+        if (roundState.round) {
+          setCurrentRound(roundState.round);
         }
       }
 
-      // Check if game is finished
-      if (matchState && matchState.finished) {
-        const isDraw = matchState.finished.draw;
-        const isWinner = !isDraw && matchState.finished.winner === account.decodedAddress;
-        setUserWonTheMatch(isDraw ? null : isWinner);
-        setMatchInProgress(false);
+      // Check match completion
+      if (matchState) {
+        if (matchState.finished) {
+          const isDraw = matchState.finished.draw;
+          const isWinner =
+            !isDraw && matchState.finished.winner === account.decodedAddress;
+          setUserWonTheMatch(isDraw ? null : isWinner);
+          setMatchInProgress(false);
+        } else if (matchState.roundFinished) {
+          // Handle round completion
+          setRoundResult(
+            matchState.roundFinished.winner === account.decodedAddress
+              ? "You won this round!"
+              : matchState.roundFinished.draw
+              ? "Round Draw!"
+              : "You lost this round!"
+          );
+          setTimeout(() => setRoundResult(null), 3000);
+        }
       }
     } catch (error) {
       console.error("Error polling game state:", error);
@@ -93,7 +127,7 @@ export function BoardGame2() {
   // Setup polling when match is in progress
   useEffect(() => {
     let pollInterval: NodeJS.Timeout;
-    
+
     if (matchInProgress && currentMatchId) {
       pollInterval = setInterval(pollGameState, POLLING_INTERVAL);
     }
@@ -114,9 +148,27 @@ export function BoardGame2() {
 
     try {
       setIsLoading(true);
-      await sendPlayCardTransaction(Number(card[0]));
-      setIsPlayerTurn(false);
+      const cardId = Number(card[0]);
+
+      // Send the card play transaction
+      await sendPlayCardTransaction(cardId);
+
+      // Update local state
       addCardToPlay(card);
+      setIsPlayerTurn(false);
+
+      // If playing with bot, start polling for response immediately
+      if (playWithBot) {
+        let attempts = 0;
+        while (attempts < 5) {
+          const roundInfo = await pollGameState();
+          if (roundInfo?.lastPlayedCard) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          attempts++;
+        }
+      }
     } catch (error) {
       console.error("Error playing card:", error);
       alert.error("Failed to play card. Please try again.");
@@ -125,7 +177,76 @@ export function BoardGame2() {
     }
   };
 
-  // Start new game
+  // Start game implementation
+  const startGame = async () => {
+    if (selectedCards.length !== 3) {
+        alert.error("Please select exactly 3 cards");
+        return;
+    }
+
+    setIsLoading(true);
+    setShowDialog(true);
+
+    try {
+        // Convert selected cards to IDs
+        const selectedCardIds = selectedCards.map((card: CardProps) => Number(card[0]));
+        
+        // First send the join game transaction
+        console.log("Sending join game transaction with cards:", selectedCardIds);
+        await sendJoinGameTransaction(selectedCardIds);
+        
+        // Wait a bit for the transaction to be processed
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Poll for match ID and game details
+        let matchFound = false;
+        let attempts = 0;
+        
+        while (!matchFound && attempts < MAX_POLLING_ATTEMPTS) {
+            try {
+                const matchId = await getCurrentUserMatch();
+                console.log("Polling for match ID:", matchId);
+                
+                if (matchId !== -1) {
+                    console.log("Match found with ID:", matchId);
+                    setCurrentMatchId(matchId);
+                    setUserInMatch(true);
+                    setMatchInProgress(true);
+                    
+                    // Get initial game details
+                    const gameDetails = await api.programState.read({
+                        programId: MAIN_CONTRACT.PROGRAM_ID,
+                        payload: { GameInformationById: matchId }
+                    }, ProgramMetadata.from(MAIN_CONTRACT.METADATA));
+
+                    console.log("Game details:", gameDetails.toJSON());
+                    
+                    matchFound = true;
+                } else {
+                    console.log("No match found yet, attempt:", attempts + 1);
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    attempts++;
+                }
+            } catch (error) {
+                console.error("Error polling for match:", error);
+                attempts++;
+            }
+        }
+
+        if (!matchFound) {
+            throw new Error("Failed to find match after multiple attempts");
+        }
+
+    } catch (error) {
+        console.error("Error starting game:", error);
+        alert.error("Failed to start game. Please try again.");
+        resetBoard();
+    } finally {
+        setIsLoading(false);
+        setShowDialog(false);
+    }
+};
+  // Handle game navigation
   const handleNewGame = () => {
     resetBoard();
     setIsPlayerTurn(true);
@@ -134,7 +255,6 @@ export function BoardGame2() {
     navigate("/selection");
   };
 
-  // Go to home
   const handleGoHome = () => {
     resetBoard();
     setIsPlayerTurn(true);
@@ -143,52 +263,20 @@ export function BoardGame2() {
     navigate("/");
   };
 
-  // Handle play button
-  const startGame = async () => {
-    if (selectedCards.length !== 3) {
-      alert.error("Please select exactly 3 cards");
-      return;
-    }
-
-    setIsLoading(true);
-    setShowDialog(true);
-
-    try {
-      await handlePlayButton();
-      const matchId = await getCurrentUserMatch();
-      console.log("Match ID:", matchId);
-      
-      if (matchId !== -1) {
-        setCurrentMatchId(matchId);
-        setUserInMatch(true);
-        setMatchInProgress(true);
-      } else {
-        throw new Error("Failed to get match ID");
-      }
-    } catch (error) {
-      console.error("Error starting game:", error);
-      alert.error("Failed to start game. Please try again.");
-      resetBoard();
-    } finally {
-      setIsLoading(false);
-      setShowDialog(false);
-    }
-  };
-
   // Countdown timer effect
   useEffect(() => {
     let timer: NodeJS.Timeout;
-    
+
     if (showDialog && timeLeft > 0) {
       timer = setInterval(() => {
-        setTimeLeft(prev => prev - 1);
+        setTimeLeft((prev) => prev - 1);
       }, 1000);
     } else if (timeLeft === 0) {
       clearInterval(timer);
       setShowDialog(false);
       navigate("/play");
     }
-    
+
     return () => {
       if (timer) {
         clearInterval(timer);
@@ -206,7 +294,7 @@ export function BoardGame2() {
         }
       }
     };
-    
+
     initMatchId();
   }, [api, account, getCurrentUserMatch]);
 
@@ -240,7 +328,8 @@ export function BoardGame2() {
         </div>
         <div className="flex items-center">
           <p className="text-sm w-96 overflow-hidden whitespace-nowrap truncate mr-2">
-            {enemyName}
+            {enemyName ??
+              (playWithBot ? "Bot Player" : "Waiting for opponent...")}
           </p>
           <img
             src="/enemy-avatar.jpg"
@@ -250,12 +339,22 @@ export function BoardGame2() {
         </div>
       </div>
 
-      {/* Turn indicator */}
-      <div className="flex justify-center mb-2 bg-gradient-to-r from-purple-800 to-green-500 rounded-xl">
-        <p className="text-sm p-2 font-bold">
-          {isPlayerTurn ? "Your Turn" : "Enemy's Turn"}
-        </p>
+      {/* Round and Turn indicator */}
+      <div className="flex flex-col items-center mb-4">
+        <div className="text-sm mb-2">Round {currentRound}/3</div>
+        <div className="bg-gradient-to-r from-purple-800 to-green-500 rounded-xl p-2">
+          <p className="text-sm font-bold">
+            {isPlayerTurn ? "Your Turn" : "Enemy's Turn"}
+          </p>
+        </div>
       </div>
+
+      {/* Round result notification */}
+      {roundResult && (
+        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-gradient-to-r from-purple-800 to-green-500 rounded-xl p-4 z-50">
+          <p className="text-lg font-bold">{roundResult}</p>
+        </div>
+      )}
 
       {/* Game board */}
       <div className="w-full max-w-5xl grid grid-cols-2 gap-4 mb-8">
@@ -289,7 +388,7 @@ export function BoardGame2() {
             ))}
             {selectedCards.length < 3 &&
               Array.from(Array(3 - selectedCards.length).keys()).map(
-                (index) => <EmptySlot key={`empty-${index}`} />
+                (index) => <EmptySlot key={`empty-${index}`} scale={0.6} />
               )}
           </div>
         </div>
@@ -346,7 +445,11 @@ export function BoardGame2() {
       {showDialog && (
         <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-75">
           <div className="bg-black text-white p-8 rounded-lg text-center border-2 border-violet-800">
-            <h2 className="text-lg mb-3">Searching for an opponent...</h2>
+            <h2 className="text-lg mb-3">
+              {playWithBot
+                ? "Starting bot game..."
+                : "Searching for an opponent..."}
+            </h2>
             <p>
               Time left: {Math.floor(timeLeft / 60)}:
               {(timeLeft % 60).toString().padStart(2, "0")}
@@ -368,9 +471,11 @@ export function BoardGame2() {
           onClick={startGame}
           disabled={selectedCards.length !== 3}
         >
-          Let's Go!
+          Let's Go! {playWithBot ? "(vs Bot)" : "(vs Player)"}
         </button>
       )}
     </div>
   );
 }
+
+export default BoardGame2;

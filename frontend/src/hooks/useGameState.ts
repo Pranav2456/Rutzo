@@ -71,13 +71,18 @@ function useGameState() {
             return -1;
         }
 
+        console.log(account.decodedAddress);
+
         try {
             const stateResult = await api.programState.read({
                 programId: MAIN_CONTRACT.PROGRAM_ID,
                 payload: { PlayerIsInMatch: account.decodedAddress }
             }, mainContractMetadata);
+
+            console.log("State result:", stateResult);
             
             const { playerInMatch }: any = stateResult.toJSON();
+            console.log("Player in match:", playerInMatch);
             const matchId = playerInMatch ?? -1;
             if (matchId !== -1) {
                 setCurrentMatchId(matchId);
@@ -167,7 +172,7 @@ function useGameState() {
                 payload: {
                     JoinGame: {
                         cards_id: selectedCardIds,
-                        play_with_bot: true // Using bot play for testing
+                        play_with_bot: false
                     }
                 },
                 gasLimit: 10000000,
@@ -194,14 +199,26 @@ function useGameState() {
     
             return new Promise((resolve, reject) => {
                 joinGameExtrinsic
-                    .signAndSend(account.decodedAddress, { signer }, ({ status }) => {
-                        if (status.isInBlock) {
-                            console.log(`Completed at block hash #${status.asInBlock.toString()}`);
-                            resolve(true);
-                        } else {
+                    .signAndSend(
+                        account.decodedAddress, 
+                        { signer }, 
+                        ({ status, events = [] }) => {
+                            if (status.isFinalized) {
+                                const success = events.some(
+                                    ({ event: { method } }) => method === 'ExtrinsicSuccess'
+                                );
+                                
+                                if (success) {
+                                    console.log("Join game transaction successful");
+                                    resolve(true);
+                                } else {
+                                    console.error("Join game transaction failed");
+                                    reject(new Error("Transaction failed"));
+                                }
+                            }
                             console.log(`Current status: ${status.type}`);
                         }
-                    })
+                    )
                     .catch(reject);
             });
         } catch (error) {
@@ -526,6 +543,7 @@ const handlePlayButton = useCallback(async () => {
         matchInProgress,
         setMatchInProgress,
         setEnemyCard,
+        setEnemyCardCount,
         setUserInMatch,
         actualUserInMatch,
         enemyCard,
@@ -541,7 +559,9 @@ const handlePlayButton = useCallback(async () => {
         resetBoard,
         setUserWonTheMatch,
         getCurrentUserMatch,
-        sendPlayCardTransaction
+        sendPlayCardTransaction,
+        sendJoinGameTransaction,
+        getMatchDetails,
     };
 }
 
