@@ -17,6 +17,8 @@ const Selection = () => {
   const alert = useAlert();
   const mainContractMetadata = ProgramMetadata.from(MAIN_CONTRACT.METADATA);
 
+  console.log("board", board);
+
   const handleLetsGo = async () => {
     if (!api || !account) return;
 

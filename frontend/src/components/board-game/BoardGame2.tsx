@@ -64,6 +64,7 @@ function BoardGame2() {
       );
 
       const gameId = playerInMatchResult?.PlayerInMatch;
+      console.log("gameId: " + gameId);
       if (gameId) {
         setGameId(gameId);
 
